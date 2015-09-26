@@ -1,81 +1,80 @@
-function [mappedX, mapping] = JointBayesian(X, labels)
-%LDA Perform the LDA algorithm
-%
-%   [mappedX, mapping] = lda(X, labels, no_dims)
-%
-% The function runs LDA on a set of datapoints X. The variable
-% no_dims sets the number of dimensions of the feature points in the 
-% embedded feature space (no_dims >= 1, default = 2). The maximum number 
-% for no_dims is the number of classes in your data minus 1. 
-% The function returns the coordinates of the low-dimensional data in 
-% mappedX. Furthermore, it returns information on the mapping in mapping.
-%
-%
+function mapping = JointBayesian(X, labels)
+% X: 特征n*m，每行是一个样本
+% labels: n*1
+% 
 
-% This file is part of the Matlab Toolbox for Dimensionality Reduction.
-% The toolbox can be obtained from http://homepage.tudelft.nl/19j49
-% You are free to use, change, or redistribute this code in any way you
-% want for non-commercial purposes. However, it is appreciated if you 
-% maintain the name of the original author.
-%
 % (C) Laurens van der Maaten, Delft University of Technology
 % Make sure data is zero mean
 %     mapping.mean = mean(X, 1);
 %     [COEFF,SCORE] = princomp(X,'econ');
 %     X = SCORE(:,1:400);
 %     X = bsxfun(@minus,X,mapping.mean);
-    m = length(labels);
-    n = size(X,2);
-	
-	% Make sure labels are nice
-	[classes, bar, labels] = unique(labels);
-    nc = length(classes);
-	
-	% Intialize Sw
-	Sw = zeros(size(X, 2), size(X, 2));
-    
-   cur = {};
-    withinCount = 0;
-    numberBuff = zeros(1000,1);
-%     numberInvert = zeros(1000,1);
-    maxNumberInOneClass = [];
-    for i=1:nc
-        % Get all instances with class i
-        cur{i} = X(labels == i,:);
-        if size(cur{i},1)>1
-            withinCount = withinCount + size(cur{i},1);
-        end;
-        if numberBuff(size(cur{i},1)) ==0
-            numberBuff(size(cur{i},1)) = 1;
-            maxNumberInOneClass = [maxNumberInOneClass;size(cur{i},1)];
-        end;
-    end;
-    disp([nc withinCount]);
-    fprintf('prepare done, maxNumberInOneClass=%d.\n',length(maxNumberInOneClass));
-    tic;
-    u = zeros(n,nc);
-    ep = zeros(n,withinCount);
-    nowp = 1;
-	% Sum over classes
-	for i=1:nc
-		% Update within-class scatter
-        u(:,i) = mean(cur{i},1)';
-        
-        if size(cur{i},1)>1
-            ep(:,nowp:nowp+ size(cur{i}, 1)-1) = bsxfun(@minus,cur{i}',u(:,i));
-            nowp = nowp + size(cur{i}, 1);
-%             C = cov(cur{i});
-%             p = size(cur{i}, 1) / withinCount;
-%             Sw = Sw + (p * C);
-        end;
-	end;
-        Su = cov(u');
-        Sw = cov(ep');
+sample_count = length(labels);
+fea_dims = size(X,2);
+
+% Make sure labels are nice
+[classes, ~, labels] = unique(labels);
+class_count = length(classes);
+
+samples_per_class = cell(class_count, 1);
+% 所有的Variants的数量
+%   注意，这是所有类别的Variants的数量加起来，
+%   如果某个类别只有一个样本，那么variations为0）
+variant_count = 0;
+
+% 只是一个标记，后面在算F跟G的时候，样本数一样的subject，他们的F跟G是相等的，
+% 使用这个标记可以减少重复计算
+count2ind = containers.Map('KeyType','double','ValueType','int32');
+
+for i = 1:class_count
+  % Get all instances with class i
+  samples_per_class{i} = X(labels == i, :);
+  count = size(samples_per_class{i}, 1);
+  if count > 1
+    variant_count = variant_count + count;
+  end;
+  if ~isKey(count2ind, count)
+    count2ind(count) = count2ind.Count + 1;
+  end;
+end;
+fprintf('Class count: %d\n', class_count);
+fprintf('Variants count: %d\n', variant_count);
+
+tic;
+% 同一类的所有样本的均值
+u = zeros(fea_dims, class_count);
+% 第二维是variant_count，
+% 因为算within-class，所以需要错位
+% 某些列只有特定的类别才有值存在，否则为0
+% 注意的是，在填值的时候，需要先减均值，
+% 这样在算协方差的时候就可以直接点乘，否则0就没意义了。
+ep = zeros(fea_dims, variant_count);
+cur_variant_ind = 1;
+% Sum over classes
+for i = 1:class_count
+  % Update within-class scatter
+  u(:,i) = mean(samples_per_class{i}, 1)';
+
+  count = size(samples_per_class{i}, 1);
+  if count > 1
+    ep(:, cur_variant_ind:cur_variant_ind + count - 1) = ...
+      bsxfun(@minus,samples_per_class{i}', u(:,i));
+    cur_variant_ind = cur_variant_ind + count;
+    %             C = cov(cur{i});
+    %             p = size(cur{i}, 1) / withinCount;
+    %             Sw = Sw + (p * C);
+  end;
+end;
+
+% 下面是对应不同的初始化方法
+Su = cov(u'); % identify的协方差
+Sw = cov(ep'); % variant的协方差
 %     Su = u*u'/nc;
 %     Sw = ep*ep'/withinCount;
+
 %     Su = cov(rand(n,n));
 %     Sw = cov(rand(5*n,n));
-    toc;
+toc;
 %     F = inv(Sw);
 %     mapping.Su = Su;
 %     mapping.Sw = Sw;
@@ -83,53 +82,60 @@ function [mappedX, mapping] = JointBayesian(X, labels)
 %     mapping.A = inv(Su + Sw) - (F + mapping.G);
 %     mappedX = X;
 % end
-    
-    oldSw = Sw;
-%     Gs = cell(maxNumberInOneClass,1);
-    SuFG = cell(1000,1);
-    SwG = cell(1000,1);
-    
-    for l=1:500
-%         tic;
-        F = inv(Sw);
-        ep =zeros(n,m);
-        nowp = 1;
-        for g = 1:1000
-            if numberBuff(g)==1
-                G = -1 .* (g .* Su + Sw) \ Su / Sw;
-                SuFG{g} = Su * (F + g.*G);
-                SwG{g} = Sw*G;
-            end;
-        end;
-        for i=1:nc
-            nnc = size(cur{i}, 1);
-%             G = Gs{nnc};
-            u(:,i) = sum(SuFG{nnc} * cur{i}',2);
-            ep(:,nowp:nowp+ size(cur{i}, 1)-1) = bsxfun(@plus,cur{i}',sum(SwG{nnc}*cur{i}',2));
-            nowp = nowp+ nnc;
-        end;
-        Su = cov(u');
-        Sw = cov(ep');
-%     Su = u*u'/nc;
-%     Sw = ep*ep'/withinCount;
-        fprintf('%d %f\n',l,norm(Sw - oldSw)/norm(Sw));
-%         toc;
-        if norm(Sw - oldSw)/norm(Sw)<1e-6
-            break;
-        end;
-        oldSw = Sw;
-    end;
-    F = inv(Sw);
-    mapping.G = -1 .* (2 * Su + Sw) \ Su / Sw;
-    mapping.A = inv(Su + Sw) - (F + mapping.G);
-    mapping.Sw = Sw;
-    mapping.Su = Su;
+
+oldSw = Sw;
+SuFG = cell(count2ind.Count, 1);
+SwG = cell(count2ind.Count, 1);
+
+% 终止条件有两个
+% (1) 达到最大迭代次数
+% (2) 协方差变化少于某个阈值
+max_iter = 500;
+epsilon = 1e-6;
+keys_of_count2ind = keys(count2ind);
+for iter=1:max_iter
+  %         tic;
+  F = inv(Sw);
+  ep = zeros(fea_dims, sample_count);
+  cur_variant_ind = 1;
+  for g = 1:numel(keys_of_count2ind);
+    count = keys_of_count2ind{g};
+    ind = count2ind(count);
+    G = -1 .* (count .* Su + Sw) \ Su / Sw;
+    SuFG{ind} = Su * (F + count .* G);
+    SwG{ind} = Sw * G;
+  end;
+  
+  for i = 1:class_count
+    count = size(samples_per_class{i}, 1);
+    ind = count2ind(count);
+    u(:, i) = sum(SuFG{ind} * samples_per_class{i}', 2);
+    ep(:, cur_variant_ind:cur_variant_ind + count -1) = ...
+      bsxfun(@plus, samples_per_class{i}', ...
+        sum(SwG{ind} * samples_per_class{i}', 2));
+      
+    cur_variant_ind = cur_variant_ind + count;
+  end;
+  
+  Su = cov(u');
+  Sw = cov(ep');
+  %     Su = u*u'/nc;
+  %     Sw = ep*ep'/withinCount;
+  incre_of_Sw = norm(Sw - oldSw) / norm(Sw);
+  fprintf('iter %d: diff %f\n', iter, incre_of_Sw);
+  %         toc;
+  if incre_of_Sw < epsilon
+    break;
+  end;
+  oldSw = Sw;
+end;
+
+F = inv(Sw);
+mapping.G = -1 .* (2 * Su + Sw) \ Su / Sw;
+mapping.A = inv(Su + Sw) - (F + mapping.G);
+mapping.Sw = Sw;
+mapping.Su = Su;
 %     mapping.U = chol(-G,'upper');
 %     mapping.COEFF = COEFF;
 %     mapping.y = mapping.U * X';
-    mapping.c = zeros(m,1);
-    for i = 1:m
-        mapping.c(i) = X(i,:) * mapping.A * X(i,:)';
-    end;
-    mappedX = X;
-   
+
